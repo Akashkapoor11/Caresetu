@@ -1,4 +1,6 @@
-streamlit
+streamlit>=1.18.0
+google-genai
+google-generative-ai==0.7.2
 openai
 pillow
 pytesseract
@@ -13,6 +15,5 @@ uvicorn
 fastapi
 requests
 pinecone-client
-google-genai
 numpy
 easyocr
