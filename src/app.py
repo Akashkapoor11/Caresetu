@@ -1668,7 +1668,7 @@ page_choice = st.sidebar.radio(
     "Go to",
     pages,
     index=pages.index(st.session_state.page),
-    key="nav_radio",
+    key="nav_radio_main",
 )
 st.session_state.page = page_choice
 
@@ -1690,3 +1690,4 @@ route_map.get(st.session_state.page, page_assistant)()
 # Footer
 st.markdown("---")
 st.markdown("<div class='muted'>🔒 <strong>All advice is for awareness only.</strong> For emergencies, consult a certified pediatrician or call local emergency services.</div>", unsafe_allow_html=True)
+
