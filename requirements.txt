@@ -12,11 +12,7 @@ python-dotenv
 uvicorn
 fastapi
 requests
-streamlit
-uvicorn
 pinecone-client
-streamlit
 google-generative-ai
 numpy
 easyocr
-tesseract
