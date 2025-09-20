@@ -13,6 +13,5 @@ uvicorn
 fastapi
 requests
 pinecone-client
-google-generative-ai
 numpy
 easyocr
