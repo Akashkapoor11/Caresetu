@@ -1,17 +1,23 @@
-﻿# Environment
-.env
-.env.local
-.env.*local
-
-# Python
+﻿# Python virtualenv
 venv/
+env/
 .venv/
-__pycache__/
-*.pyc
 
-# OS
+# data / caches / local files
+.data/
+*.db
+*.sqlite
+*.zip
+
+# env files
+.env
+.env.*
+secrets.json
+
+# OS files
 Thumbs.db
 .DS_Store
 
-# Streamlit/local data
-.data/
+# editor
+.vscode/
+.idea/

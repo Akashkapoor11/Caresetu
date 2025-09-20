@@ -1,0 +1,17 @@
+streamlit
+openai
+pillow
+pytesseract
+SpeechRecognition
+gTTS
+pymongo
+dnspython
+altair
+pandas
+python-dotenv
+uvicorn
+fastapi
+requests
+streamlit
+uvicorn
+pinecone-client
