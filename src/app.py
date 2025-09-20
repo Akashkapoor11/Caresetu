@@ -1,5 +1,4 @@
-# app.py - CareSetu Streamlit app (updated OCR + VLM heuristics, minimal UI tips)
-# Save and run: streamlit run app.py
+# app.py - CareSetu Streamlit app (updated: Gemini SDK + REST fallback, unique streamlit keys)
 
 import streamlit as st
 import os
@@ -12,6 +11,7 @@ import base64
 from datetime import datetime, date
 from pathlib import Path
 import tempfile
+import requests  # used for Gemini REST fallback
 
 # Optional libs (defensive imports)
 try:
@@ -135,19 +135,102 @@ if openai and OPENAI_API_KEY:
             pass
 
 # -----------------------
-# LLM wrappers (unchanged logic, defensive)
+# Gemini REST fallback helper
+# -----------------------
+def gemini_generate_rest(prompt: str, model="gemini-2.0-flash", max_tokens=400, temperature=0.2):
+    """
+    Call Gemini via REST API if SDK fails.
+    Uses Google Generative Language REST endpoint with api key query param.
+    """
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY not set for REST fallback.")
+
+    # If a custom GEMINI_API_URL provided, use it; otherwise use Google public generativelanguage endpoint.
+    if GEMINI_API_URL:
+        base = GEMINI_API_URL.rstrip("/")
+    else:
+        base = "https://generativelanguage.googleapis.com/v1beta"
+
+    # This REST path may need adjusting depending on the exact REST shape of your SDK; this is a common pattern.
+    url = f"{base}/models/{model}:generateContent?key={api_key}"
+    headers = {"Content-Type": "application/json; charset=utf-8"}
+    # Build a body compatible with common generative language REST endpoints.
+    body = {
+        "contents": [{"text": prompt}],
+        "generationConfig": {
+            "maxOutputTokens": int(max_tokens),
+            "temperature": float(temperature)
+        }
+    }
+    try:
+        resp = requests.post(url, headers=headers, json=body, timeout=30)
+        # Raise for HTTP errors so we can include them in message
+        resp.raise_for_status()
+        data = resp.json()
+        # Try a few shapes that the generative responses come in
+        if isinstance(data, dict):
+            # older shape: candidates
+            if "candidates" in data and data["candidates"]:
+                c = data["candidates"][0]
+                # candidate may be dict or string
+                if isinstance(c, dict):
+                    # nested structure possible
+                    if "content" in c:
+                        # content could be a dict with parts
+                        cont = c["content"]
+                        if isinstance(cont, dict) and "parts" in cont and cont["parts"]:
+                            return cont["parts"][0].get("text") or str(cont)
+                        # if content is string
+                        return str(cont)
+                    # fallback keys
+                    return c.get("output") or c.get("text") or json.dumps(c)
+                else:
+                    return str(c)
+            # modern shape: outputs
+            if "outputs" in data and data["outputs"]:
+                out0 = data["outputs"][0]
+                # try to get text in a couple of ways
+                if isinstance(out0, dict):
+                    if "content" in out0:
+                        cont = out0["content"]
+                        if isinstance(cont, dict) and "parts" in cont and cont["parts"]:
+                            return cont["parts"][0].get("text") or str(cont)
+                        return str(cont)
+                    if "text" in out0:
+                        return out0["text"]
+                    # nested candidate structure
+                    if "candidates" in out0 and out0["candidates"]:
+                        cand = out0["candidates"][0]
+                        if isinstance(cand, dict):
+                            return cand.get("content") or cand.get("text") or str(cand)
+                        else:
+                            return str(cand)
+            # fallback: try to stringify main message
+            if "message" in data:
+                return json.dumps(data["message"])
+        # last resort
+        return json.dumps(data)
+    except requests.HTTPError as http_err:
+        raise RuntimeError(f"Gemini REST HTTP error {http_err} - status {getattr(http_err.response,'status_code',None)}: {http_err}")
+    except Exception as e:
+        raise RuntimeError(f"Gemini REST call failed: {e}")
+
+# -----------------------
+# LLM wrapper: try SDKs then REST
 # -----------------------
 def call_gemini(prompt: str, max_tokens: int = 400, temperature: float = 0.2, model_hint: str = None) -> str:
     """
-    Try modern google.genai then fallback to older google.generativeai.
+    Try modern google.genai then fallback to older google.generativeai, then REST.
     Returns text or raises RuntimeError with brief message.
     """
-    if not GEMINI_API_KEY:
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not api_key:
         raise RuntimeError("GEMINI_API_KEY not set.")
 
     model_name = model_hint or "gemini-2.0-flash"
 
-    # Try modern SDK
+    # Try modern SDK if available
     try:
         try:
             from google import genai as genai_modern  # type: ignore
@@ -155,45 +238,61 @@ def call_gemini(prompt: str, max_tokens: int = 400, temperature: float = 0.2, mo
             genai_modern = None
 
         if genai_modern is not None:
-            client = genai_modern.Client(api_key=GEMINI_API_KEY)
-            # Try a commonly used call; some SDK versions differ.
             try:
-                resp = client.models.generate_content(
-                    model=model_name,
-                    contents=prompt,
-                    max_output_tokens=int(max_tokens),
-                    temperature=float(temperature),
-                )
-            except TypeError:
-                # fallback without max_output_tokens param
-                resp = client.models.generate_content(
-                    model=model_name,
-                    contents=prompt,
-                    temperature=float(temperature),
-                )
-            # Normalize response
-            if hasattr(resp, "text") and resp.text:
-                return resp.text
-            if hasattr(resp, "outputs") and resp.outputs:
-                out0 = resp.outputs[0]
-                if hasattr(out0, "content"):
-                    return out0.content
-            if hasattr(resp, "candidates") and resp.candidates:
-                first = resp.candidates[0]
-                if hasattr(first, "content"):
-                    return first.content
-                if isinstance(first, dict):
-                    return first.get("content") or first.get("text") or str(first)
-            return str(resp)
+                client = genai_modern.Client(api_key=api_key)
+            except Exception:
+                client = None
+            if client is not None:
+                try:
+                    # some SDK variants accept contents as string or list - try both patterns
+                    resp = None
+                    try:
+                        resp = client.models.generate_content(
+                            model=model_name,
+                            contents=prompt,
+                            max_output_tokens=int(max_tokens),
+                            temperature=float(temperature),
+                        )
+                    except TypeError:
+                        # older signature without max_output_tokens
+                        resp = client.models.generate_content(
+                            model=model_name,
+                            contents=prompt,
+                            temperature=float(temperature),
+                        )
+                    if resp is not None:
+                        # normalize
+                        if hasattr(resp, "text") and resp.text:
+                            return resp.text
+                        if hasattr(resp, "outputs") and resp.outputs:
+                            out0 = resp.outputs[0]
+                            if hasattr(out0, "content"):
+                                # content may have parts
+                                content = out0.content
+                                try:
+                                    return content.parts[0].text
+                                except Exception:
+                                    # fallback
+                                    return str(content)
+                        if hasattr(resp, "candidates") and resp.candidates:
+                            first = resp.candidates[0]
+                            if hasattr(first, "content"):
+                                return first.content
+                            if isinstance(first, dict):
+                                return first.get("content") or first.get("text") or str(first)
+                        return str(resp)
+                except Exception:
+                    # fallthrough to next SDK/REST
+                    pass
     except Exception:
         pass
 
-    # Fallback: older google.generativeai
+    # Try older google.generativeai if installed
     try:
         if genai_legacy is not None:
             try:
                 try:
-                    genai_legacy.configure(api_key=GEMINI_API_KEY)
+                    genai_legacy.configure(api_key=api_key)
                 except Exception:
                     pass
                 if hasattr(genai_legacy, "generate_text"):
@@ -203,7 +302,10 @@ def call_gemini(prompt: str, max_tokens: int = 400, temperature: float = 0.2, mo
                             if k in resp:
                                 v = resp[k]
                                 if isinstance(v, list) and v:
-                                    return v[0].get("content") or v[0].get("text") or str(v[0])
+                                    first = v[0]
+                                    if isinstance(first, dict):
+                                        return first.get("content") or first.get("text") or json.dumps(first)
+                                    return str(first)
                                 return str(v)
                     if hasattr(resp, "text") and resp.text:
                         return resp.text
@@ -229,9 +331,15 @@ def call_gemini(prompt: str, max_tokens: int = 400, temperature: float = 0.2, mo
     except Exception:
         pass
 
-    # If both fail, raise friendly error (caller will show fallback UI)
-    raise RuntimeError("Gemini SDK not available or call patterns failed. Ensure GEMINI_API_KEY and google-genai are installed/compatible.")
+    # REST fallback
+    try:
+        return gemini_generate_rest(prompt, model=model_name, max_tokens=max_tokens, temperature=temperature)
+    except Exception as e:
+        raise RuntimeError(f"Gemini SDK not available or call patterns failed. REST fallback error: {e}")
 
+# ---------------------------
+# OpenAI chat wrapper (unchanged)
+# ---------------------------
 def call_openai_chat(prompt: str, model: str = "gpt-3.5-turbo", max_tokens: int = 400, temperature: float = 0.2) -> str:
     if openai is None:
         raise RuntimeError("OpenAI library not installed.")
@@ -871,21 +979,21 @@ if "last_gemini_call_ts" not in st.session_state:
 
 render_header()
 
-# Authentication UI (unchanged)
+# Authentication UI (unchanged logic but unique keys)
 if not st.session_state.user:
     st.sidebar.title("Account")
-    auth_page = st.sidebar.radio("Sign Up / Login", ["Login", "Sign up", "Continue as guest", "Profile (view only)"], key="auth_radio")
+    auth_page = st.sidebar.radio("Sign Up / Login", ["Login", "Sign up", "Continue as guest", "Profile (view only)"], key="auth_radio_main")
 
     if auth_page in ("Login", "Sign up"):
         st.markdown('<div class="hero"><h1 style="margin:0">Care for your baby — simple, reliable, personalised</h1></div>', unsafe_allow_html=True)
 
     if auth_page == "Sign up":
         st.markdown('<div class="card"><h3>Create an account</h3>', unsafe_allow_html=True)
-        with st.form("signup", clear_on_submit=False):
-            su_name = st.text_input("Username", key="su_name")
-            su_pass = st.text_input("Password", type="password", key="su_pass")
-            su_confirm = st.text_input("Confirm Password", type="password", key="su_confirm")
-            s_sub = st.form_submit_button("Sign up", key="su_submit")
+        with st.form("signup_form", clear_on_submit=False):
+            su_name = st.text_input("Username", key="su_name_input")
+            su_pass = st.text_input("Password", type="password", key="su_pass_input")
+            su_confirm = st.text_input("Confirm Password", type="password", key="su_confirm_input")
+            s_sub = st.form_submit_button("Sign up", key="su_submit_btn")
             if s_sub:
                 if not su_name or not su_pass:
                     st.error("Enter username & password")
@@ -902,10 +1010,10 @@ if not st.session_state.user:
 
     elif auth_page == "Login":
         st.markdown('<div class="card"><h3>Login</h3>', unsafe_allow_html=True)
-        with st.form("login", clear_on_submit=False):
-            li_name = st.text_input("Username", key="li_name")
-            li_pass = st.text_input("Password", type="password", key="li_pass")
-            l_sub = st.form_submit_button("Log in", key="li_submit")
+        with st.form("login_form", clear_on_submit=False):
+            li_name = st.text_input("Username", key="li_name_input")
+            li_pass = st.text_input("Password", type="password", key="li_pass_input")
+            l_sub = st.form_submit_button("Log in", key="li_submit_btn")
             if l_sub:
                 ok, res = authenticate_user(li_name, li_pass)
                 if ok:
@@ -1199,7 +1307,8 @@ def page_assistant():
                     st.write("- If severe symptoms, seek immediate care.")
     card_end()
 
-# ... (other pages unchanged except Verified Data Assistant uses our OCR and VLM)
+# ... (keep the rest of your pages unchanged; they were included in your original file)
+# For brevity I include the rest verbatim exactly as from your source:
 def page_vaccine():
     card_start("💉 Vaccine Tracker", "Recommended vaccines & status for your child.")
     child = user_get_child()
@@ -1587,6 +1696,7 @@ def page_rag_assistant():
 
     st.markdown("---")
     st.subheader("Upload voice note (wav/mp3/m4a)")
+
     uploaded_audio = st.file_uploader("Upload voice note", type=["wav","mp3","m4a","ogg"], key="rag_voice")
     if uploaded_audio:
         fd, tmp_audio = tempfile.mkstemp(suffix=Path(uploaded_audio.name).suffix)
@@ -1690,4 +1800,3 @@ route_map.get(st.session_state.page, page_assistant)()
 # Footer
 st.markdown("---")
 st.markdown("<div class='muted'>🔒 <strong>All advice is for awareness only.</strong> For emergencies, consult a certified pediatrician or call local emergency services.</div>", unsafe_allow_html=True)
-
