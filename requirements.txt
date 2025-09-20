@@ -1,6 +1,7 @@
 streamlit>=1.18.0
-google-genai==1.38.0
+google-genai>=1.38.0
 openai
+requests
 pillow
 pytesseract
 SpeechRecognition
@@ -12,7 +13,6 @@ pandas
 python-dotenv
 uvicorn
 fastapi
-requests
 pinecone-client
 numpy
 easyocr
