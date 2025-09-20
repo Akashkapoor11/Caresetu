@@ -1,14 +1,4 @@
-streamlit
-openai
-pillow
-pytesseract
-SpeechRecognition
-gTTS
-pymongo
-dnspython
-altair
-pandas
-python-dotenvstreamlit>=1.20.0
+streamlit>=1.18.0
 openai
 pillow
 pytesseract
@@ -19,14 +9,6 @@ dnspython
 altair
 pandas
 python-dotenv
-uvicorn
-fastapi
-requests
-pinecone-client
-google-genai      # <-- modern SDK name (use this instead of google-generative-ai)
-numpy
-easyocr
-
 uvicorn
 fastapi
 requests
