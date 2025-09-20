@@ -221,16 +221,19 @@ def gemini_generate_rest(prompt: str, model="gemini-2.0-flash", max_tokens=400, 
 # -----------------------
 def call_gemini(prompt: str, max_tokens: int = 400, temperature: float = 0.2, model_hint: str = None) -> str:
     """
-    Try modern google.genai then fallback to older google.generativeai, then REST.
-    Returns text or raises RuntimeError with brief message.
+    Robust Gemini caller:
+      1) Try modern google.genai SDK if available.
+      2) Try legacy google.generativeai if available.
+      3) Try REST fallback (two common endpoint flavors) and return text.
+    Raises RuntimeError with a helpful message if all attempts fail.
     """
-    api_key = os.getenv("GEMINI_API_KEY", "").strip()
-    if not api_key:
-        raise RuntimeError("GEMINI_API_KEY not set.")
+    if not GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY not set in environment.")
 
     model_name = model_hint or "gemini-2.0-flash"
+    last_exc = None
 
-    # Try modern SDK if available
+    # --- 1) modern SDK (google.genai) ---
     try:
         try:
             from google import genai as genai_modern  # type: ignore
@@ -239,62 +242,51 @@ def call_gemini(prompt: str, max_tokens: int = 400, temperature: float = 0.2, mo
 
         if genai_modern is not None:
             try:
-                client = genai_modern.Client(api_key=api_key)
-            except Exception:
-                client = None
-            if client is not None:
+                client = genai_modern.Client(api_key=GEMINI_API_KEY)
+                # Different SDK versions use different signatures; try a couple.
                 try:
-                    # some SDK variants accept contents as string or list - try both patterns
-                    resp = None
-                    try:
-                        resp = client.models.generate_content(
-                            model=model_name,
-                            contents=prompt,
-                            max_output_tokens=int(max_tokens),
-                            temperature=float(temperature),
-                        )
-                    except TypeError:
-                        # older signature without max_output_tokens
-                        resp = client.models.generate_content(
-                            model=model_name,
-                            contents=prompt,
-                            temperature=float(temperature),
-                        )
-                    if resp is not None:
-                        # normalize
-                        if hasattr(resp, "text") and resp.text:
-                            return resp.text
-                        if hasattr(resp, "outputs") and resp.outputs:
-                            out0 = resp.outputs[0]
-                            if hasattr(out0, "content"):
-                                # content may have parts
-                                content = out0.content
-                                try:
-                                    return content.parts[0].text
-                                except Exception:
-                                    # fallback
-                                    return str(content)
-                        if hasattr(resp, "candidates") and resp.candidates:
-                            first = resp.candidates[0]
-                            if hasattr(first, "content"):
-                                return first.content
-                            if isinstance(first, dict):
-                                return first.get("content") or first.get("text") or str(first)
-                        return str(resp)
-                except Exception:
-                    # fallthrough to next SDK/REST
-                    pass
+                    resp = client.models.generate_content(
+                        model=model_name,
+                        contents=prompt,
+                        max_output_tokens=int(max_tokens),
+                        temperature=float(temperature),
+                    )
+                except TypeError:
+                    # fallback to other param names
+                    resp = client.models.generate_content(
+                        model=model_name,
+                        contents=prompt,
+                        temperature=float(temperature),
+                    )
+                # Normalize response
+                if hasattr(resp, "text") and resp.text:
+                    return resp.text
+                if hasattr(resp, "outputs") and resp.outputs:
+                    out0 = resp.outputs[0]
+                    if hasattr(out0, "content"):
+                        return out0.content
+                if hasattr(resp, "candidates") and resp.candidates:
+                    c = resp.candidates[0]
+                    if isinstance(c, dict):
+                        return c.get("content") or c.get("text") or str(c)
+                    return str(c)
+                return str(resp)
+            except Exception as e:
+                last_exc = e
     except Exception:
         pass
 
-    # Try older google.generativeai if installed
+    # --- 2) legacy SDK (google.generativeai) ---
     try:
         if genai_legacy is not None:
             try:
+                # some versions require configure
                 try:
-                    genai_legacy.configure(api_key=api_key)
+                    genai_legacy.configure(api_key=GEMINI_API_KEY)
                 except Exception:
                     pass
+
+                # try generate_text or GenerativeModel based APIs
                 if hasattr(genai_legacy, "generate_text"):
                     resp = genai_legacy.generate_text(model=model_name, prompt=prompt, max_output_tokens=int(max_tokens))
                     if isinstance(resp, dict):
@@ -302,10 +294,10 @@ def call_gemini(prompt: str, max_tokens: int = 400, temperature: float = 0.2, mo
                             if k in resp:
                                 v = resp[k]
                                 if isinstance(v, list) and v:
-                                    first = v[0]
-                                    if isinstance(first, dict):
-                                        return first.get("content") or first.get("text") or json.dumps(first)
-                                    return str(first)
+                                    c = v[0]
+                                    if isinstance(c, dict):
+                                        return c.get("content") or c.get("text") or str(c)
+                                    return str(c)
                                 return str(v)
                     if hasattr(resp, "text") and resp.text:
                         return resp.text
@@ -326,16 +318,141 @@ def call_gemini(prompt: str, max_tokens: int = 400, temperature: float = 0.2, mo
                                     return str(c)
                                 return str(v)
                     return str(resp)
-            except Exception:
-                pass
+            except Exception as e:
+                last_exc = e
     except Exception:
         pass
 
-    # REST fallback
-    try:
-        return gemini_generate_rest(prompt, model=model_name, max_tokens=max_tokens, temperature=temperature)
-    except Exception as e:
-        raise RuntimeError(f"Gemini SDK not available or call patterns failed. REST fallback error: {e}")
+    # --- 3) REST fallback (try v1beta :generateContent and v1beta2 :generate) ---
+    import requests
+    headers = {"Content-Type": "application/json"}
+    # Some simple bodies used by different endpoints
+    body_v1beta = {
+        "contents": [
+            {"parts":[{"text": prompt}]}
+        ],
+        "temperature": float(temperature),
+        "maxOutputTokens": int(max_tokens)
+    }
+    body_v1beta2 = {
+        "prompt": {"text": prompt},
+        "temperature": float(temperature),
+        "max_output_tokens": int(max_tokens)
+    }
+
+    # Utility to attempt REST call and extract text robustly
+    def attempt_rest(url: str, json_body):
+        nonlocal last_exc
+        try:
+            resp = requests.post(url, json=json_body, headers=headers, timeout=20)
+            # Raise for HTTP errors so we can inspect status code
+            resp.raise_for_status()
+            j = resp.json()
+            # Try common fields in responses
+            # v1beta: outputs/candidates/response[0].content.parts[*].text
+            if isinstance(j, dict):
+                # many variants — check outputs -> content -> parts
+                if "outputs" in j and isinstance(j["outputs"], list) and j["outputs"]:
+                    out0 = j["outputs"][0]
+                    # try nested content -> parts -> text
+                    if isinstance(out0, dict):
+                        if "content" in out0:
+                            c = out0["content"]
+                            if isinstance(c, dict) and "parts" in c and isinstance(c["parts"], list):
+                                parts = c["parts"]
+                                if parts:
+                                    # join text parts if present
+                                    texts = []
+                                    for p in parts:
+                                        if isinstance(p, dict) and "text" in p:
+                                            texts.append(p["text"])
+                                        elif isinstance(p, str):
+                                            texts.append(p)
+                                    if texts:
+                                        return "\n".join(texts)
+                        # fallback: outputs[0].text
+                        if "text" in out0 and out0["text"]:
+                            return out0["text"]
+                # candidates
+                if "candidates" in j and isinstance(j["candidates"], list) and j["candidates"]:
+                    c0 = j["candidates"][0]
+                    if isinstance(c0, dict):
+                        return c0.get("content") or c0.get("text") or str(c0)
+                    return str(c0)
+                # v1beta2 style: candidate -> output -> content
+                if "output" in j and isinstance(j["output"], dict):
+                    # might contain "text" or "content"
+                    out = j["output"]
+                    if "text" in out:
+                        return out["text"]
+                    # some return "content" list
+                    if "content" in out:
+                        # try to flatten textual content
+                        cont = out["content"]
+                        if isinstance(cont, list):
+                            texts = []
+                            for item in cont:
+                                if isinstance(item, dict) and "text" in item:
+                                    texts.append(item["text"])
+                            if texts:
+                                return "\n".join(texts)
+                # very simple fallback: look for any string fields
+                for k, v in j.items():
+                    if isinstance(v, str) and len(v) > 10:
+                        return v
+            # if nothing matched, return raw JSON string
+            return json.dumps(j)  # fallback
+        except requests.HTTPError as he:
+            last_exc = he
+            # attach status to exception for caller to inspect
+            raise
+        except Exception as e:
+            last_exc = e
+            raise
+
+    # Build candidate URLs carefully (do not double-up path)
+    # Try v1beta :generateContent (older pattern)
+    endpoints = [
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}",
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generate?key={GEMINI_API_KEY}",
+        f"https://generativelanguage.googleapis.com/v1beta2/models/{model_name}:generate?key={GEMINI_API_KEY}",
+    ]
+
+    # Try endpoints in order; handle 404/401/403 specially
+    for idx, url in enumerate(endpoints):
+        try:
+            json_body = body_v1beta if "generateContent" in url else body_v1beta2
+            res_text = attempt_rest(url, json_body)
+            if res_text:
+                return res_text
+        except requests.HTTPError as he:
+            status = None
+            try:
+                status = he.response.status_code
+            except Exception:
+                pass
+            # If 404, try next endpoint; if 401/403 -> suggest invalid key
+            if status in (401, 403):
+                raise RuntimeError(f"Gemini REST auth error (status {status}). Check GEMINI_API_KEY permissions and that the key is valid. Last SDK error: {last_exc}")
+            if status == 404:
+                # try next candidate URL
+                continue
+            if status in (429, 503, 500):
+                # transient server error – raise but include helpful text
+                raise RuntimeError(f"Gemini REST server error (status {status}). Try again later. Last HTTP message: {he}")
+            # otherwise keep trying other endpoints
+            continue
+        except Exception as e:
+            # network / json parse etc -> try next endpoint
+            last_exc = e
+            continue
+
+    # All attempts exhausted
+    msg = "Gemini SDK not available and REST fallback failed. "
+    if last_exc:
+        msg += f"Last error: {last_exc}"
+    raise RuntimeError(msg)
+
 
 # ---------------------------
 # OpenAI chat wrapper (unchanged)
