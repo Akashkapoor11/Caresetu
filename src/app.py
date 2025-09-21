@@ -138,6 +138,7 @@ if openai and OPENAI_API_KEY:
 # Gemini REST fallback helper
 # -----------------------
 def gemini_generate_rest(prompt: str, model="gemini-2.0-flash", max_tokens=400, temperature=0.2):
+    
     """
     Call Gemini via REST API if SDK fails.
     Uses Google Generative Language REST endpoint with api key query param.
