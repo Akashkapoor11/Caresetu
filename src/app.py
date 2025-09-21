@@ -13,6 +13,53 @@ from datetime import datetime, date
 from pathlib import Path
 import tempfile
 
+# ---------------------------
+# Robust dotenv handling
+# ---------------------------
+try:
+    from dotenv import load_dotenv, find_dotenv
+except Exception:
+    load_dotenv = None
+    find_dotenv = None
+
+def safe_load_dotenv():
+    if load_dotenv is None:
+        return False
+    try:
+        load_dotenv()
+        return True
+    except Exception:
+        try:
+            env_path = find_dotenv() or ".env"
+        except Exception:
+            env_path = ".env"
+        if not os.path.exists(env_path):
+            return False
+        try:
+            with open(env_path, "rb") as f:
+                raw = f.read()
+            decoded = raw.decode("utf-8", errors="replace")
+            tmp = tempfile.NamedTemporaryFile(delete=False, prefix="env_sanitized_", suffix=".env", mode="w", encoding="utf-8")
+            tmp.write(decoded)
+            tmp.close()
+            load_dotenv(tmp.name, override=True)
+            try:
+                os.unlink(tmp.name)
+            except Exception:
+                pass
+            return True
+        except Exception:
+            try:
+                load_dotenv(encoding="latin-1")
+                return True
+            except Exception:
+                return False
+
+safe_load_dotenv()
+
+# Import ask_gemini AFTER loading dotenv so env keys are available
+from gemini_client import ask_gemini
+
 # Optional libs (defensive imports)
 try:
     import google.generativeai as genai_legacy
@@ -75,49 +122,9 @@ except Exception:
 import pandas as pd
 import altair as alt
 
-# dotenv loader (optional)
-try:
-    from dotenv import load_dotenv, find_dotenv
-except Exception:
-    load_dotenv = None
-    find_dotenv = None
-
-def safe_load_dotenv():
-    if load_dotenv is None:
-        return False
-    try:
-        load_dotenv()
-        return True
-    except Exception:
-        try:
-            env_path = find_dotenv() or ".env"
-        except Exception:
-            env_path = ".env"
-        if not os.path.exists(env_path):
-            return False
-        try:
-            with open(env_path, "rb") as f:
-                raw = f.read()
-            decoded = raw.decode("utf-8", errors="replace")
-            tmp = tempfile.NamedTemporaryFile(delete=False, prefix="env_sanitized_", suffix=".env", mode="w", encoding="utf-8")
-            tmp.write(decoded)
-            tmp.close()
-            load_dotenv(tmp.name, override=True)
-            try:
-                os.unlink(tmp.name)
-            except Exception:
-                pass
-            return True
-        except Exception:
-            try:
-                load_dotenv(encoding="latin-1")
-                return True
-            except Exception:
-                return False
-
-safe_load_dotenv()
-
+# ---------------------------
 # Env keys
+# ---------------------------
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_API_URL = os.getenv("GEMINI_API_URL", "").strip()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
@@ -135,7 +142,7 @@ if openai and OPENAI_API_KEY:
             pass
 
 # -----------------------
-# LLM wrappers (unchanged logic, defensive)
+# LLM wrappers (defensive)
 # -----------------------
 def call_gemini(prompt: str, max_tokens: int = 400, temperature: float = 0.2, model_hint: str = None) -> str:
     """
@@ -1583,6 +1590,59 @@ def page_rag_assistant():
                         except Exception:
                             st.error("Extraction failed (AI unavailable).")
                 else:
+                    st.info
+
+def page_rag_assistant():
+    card_start("🧠 Verified Data Assistant", "Ask questions based on the verified local dataset (vaccines, clinics, schemes).")
+    if rag_pipeline is None:
+        st.warning("RAG pipeline not initialized. It may fail if GEMINI_API_KEY or VECTOR_DB not configured.")
+    col_q, col_btn = st.columns([6,1])
+    with col_q:
+        q = st.text_input("Ask dataset-powered question", placeholder="E.g., 'When is measles vaccine due?'", key="rag_q")
+    with col_btn:
+        ask = st.button("Ask", key="rag_ask")
+    if ask and q:
+        try:
+            if rag_pipeline:
+                ans = rag_pipeline.answer_from_dataset(q)
+                st.markdown("**Answer (from dataset):**")
+                st.write(ans)
+            else:
+                st.info("RAG pipeline not available — returning simple fallback.")
+                st.write("Fallback: Measles vaccine is typically given at 9 months (check local schedule).")
+        except Exception as e:
+            st.error(f"RAG query failed: {e}")
+    st.markdown("---")
+    st.subheader("Upload a vaccination card / prescription photo")
+    uploaded_img = st.file_uploader("Upload image (photo of card)", type=["png","jpg","jpeg","webp"], accept_multiple_files=False, key="rag_card")
+    ocr_text = ""
+    if uploaded_img is not None:
+        fd, tmp = tempfile.mkstemp(suffix=Path(uploaded_img.name).suffix)
+        with os.fdopen(fd, "wb") as f:
+            f.write(uploaded_img.getbuffer())
+        st.info("Running OCR on the uploaded image...")
+        ocr_text = ocr_image_to_text(tmp)
+        if not ocr_text:
+            st.info("OCR returned no text or OCR engine not available.")
+        # show the OCR output (or the helpful install message)
+        st.text_area("OCR text (preview)", value=ocr_text, height=200, key="ocr_preview")
+        if st.button("Extract fields from OCR", key="extract_ocr"):
+            if not ocr_text:
+                st.error("Cannot extract fields: OCR did not return text. See the OCR preview for details / installation instructions.")
+            else:
+                if GEMINI_API_KEY:
+                    with st.spinner("Thinking..."):
+                        try:
+                            prompt = (
+                                "Extract vaccination card fields (name, dob, vaccine, dose, date, batch) and return JSON only. OCR follows.\n\n"
+                                f"OCR:\n{ocr_text}"
+                            )
+                            extracted = call_gemini(prompt, max_tokens=400, temperature=0.0)
+                            st.markdown("**Extracted (LLM):**")
+                            st.code(extracted, language="json")
+                        except Exception:
+                            st.error("Extraction failed (AI unavailable).")
+                else:
                     st.info("AI not configured — cannot run extraction.")
 
     st.markdown("---")
@@ -1691,3 +1751,8 @@ route_map.get(st.session_state.page, page_assistant)()
 st.markdown("---")
 st.markdown("<div class='muted'>🔒 <strong>All advice is for awareness only.</strong> For emergencies, consult a certified pediatrician or call local emergency services.</div>", unsafe_allow_html=True)
 
+if __name__ == "__main__":
+    question = "Write a bedtime story about stars and dreams."
+    response = ask_gemini(question)
+    print("\n🌙 Gemini says:\n")
+    print(response)
