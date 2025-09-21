@@ -230,7 +230,7 @@ def call_gemini(prompt: str, max_tokens: int = 400, temperature: float = 0.2, mo
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY not set in environment.")
 
-    model_name = model_hint or "gemini-1.5-flash"
+    model_name = model_hint or "gemini-1.5-pro-002"
     last_exc = None
 
     # --- 1) modern SDK (google.genai) ---
