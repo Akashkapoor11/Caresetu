@@ -1,4 +1,5 @@
-# app.py - CareSetu Streamlit app (updated: Gemini SDK + REST fallback, unique streamlit keys)
+# app.py - CareSetu Streamlit app (updated OCR + VLM heuristics, minimal UI tips)
+# Save and run: streamlit run app.py
 
 import streamlit as st
 import os
@@ -11,7 +12,6 @@ import base64
 from datetime import datetime, date
 from pathlib import Path
 import tempfile
-import requests  # used for Gemini REST fallback
 
 # ---------------------------
 # Robust dotenv handling
@@ -142,110 +142,19 @@ if openai and OPENAI_API_KEY:
             pass
 
 # -----------------------
-<<<<<<< HEAD
 # LLM wrappers (defensive)
-=======
-# Gemini REST fallback helper
-# -----------------------
-def gemini_generate_rest(prompt: str, model="gemini-2.0-flash", max_tokens=400, temperature=0.2):
-    
-    """
-    Call Gemini via REST API if SDK fails.
-    Uses Google Generative Language REST endpoint with api key query param.
-    """
-    api_key = os.getenv("GEMINI_API_KEY", "").strip()
-    if not api_key:
-        raise RuntimeError("GEMINI_API_KEY not set for REST fallback.")
-
-    # If a custom GEMINI_API_URL provided, use it; otherwise use Google public generativelanguage endpoint.
-    if GEMINI_API_URL:
-        base = GEMINI_API_URL.rstrip("/")
-    else:
-        base = "https://generativelanguage.googleapis.com/v1beta"
-
-    # This REST path may need adjusting depending on the exact REST shape of your SDK; this is a common pattern.
-    url = f"{base}/models/{model}:generateContent?key={api_key}"
-    headers = {"Content-Type": "application/json; charset=utf-8"}
-    # Build a body compatible with common generative language REST endpoints.
-    body = {
-        "contents": [{"text": prompt}],
-        "generationConfig": {
-            "maxOutputTokens": int(max_tokens),
-            "temperature": float(temperature)
-        }
-    }
-    try:
-        resp = requests.post(url, headers=headers, json=body, timeout=30)
-        # Raise for HTTP errors so we can include them in message
-        resp.raise_for_status()
-        data = resp.json()
-        # Try a few shapes that the generative responses come in
-        if isinstance(data, dict):
-            # older shape: candidates
-            if "candidates" in data and data["candidates"]:
-                c = data["candidates"][0]
-                # candidate may be dict or string
-                if isinstance(c, dict):
-                    # nested structure possible
-                    if "content" in c:
-                        # content could be a dict with parts
-                        cont = c["content"]
-                        if isinstance(cont, dict) and "parts" in cont and cont["parts"]:
-                            return cont["parts"][0].get("text") or str(cont)
-                        # if content is string
-                        return str(cont)
-                    # fallback keys
-                    return c.get("output") or c.get("text") or json.dumps(c)
-                else:
-                    return str(c)
-            # modern shape: outputs
-            if "outputs" in data and data["outputs"]:
-                out0 = data["outputs"][0]
-                # try to get text in a couple of ways
-                if isinstance(out0, dict):
-                    if "content" in out0:
-                        cont = out0["content"]
-                        if isinstance(cont, dict) and "parts" in cont and cont["parts"]:
-                            return cont["parts"][0].get("text") or str(cont)
-                        return str(cont)
-                    if "text" in out0:
-                        return out0["text"]
-                    # nested candidate structure
-                    if "candidates" in out0 and out0["candidates"]:
-                        cand = out0["candidates"][0]
-                        if isinstance(cand, dict):
-                            return cand.get("content") or cand.get("text") or str(cand)
-                        else:
-                            return str(cand)
-            # fallback: try to stringify main message
-            if "message" in data:
-                return json.dumps(data["message"])
-        # last resort
-        return json.dumps(data)
-    except requests.HTTPError as http_err:
-        raise RuntimeError(f"Gemini REST HTTP error {http_err} - status {getattr(http_err.response,'status_code',None)}: {http_err}")
-    except Exception as e:
-        raise RuntimeError(f"Gemini REST call failed: {e}")
-
-# -----------------------
-# LLM wrapper: try SDKs then REST
->>>>>>> e8fd40ad544a19b0618c90ed35333f4dcad88c17
 # -----------------------
 def call_gemini(prompt: str, max_tokens: int = 400, temperature: float = 0.2, model_hint: str = None) -> str:
     """
-    Robust Gemini caller:
-      1) Try modern google.genai SDK if available.
-      2) Try legacy google.generativeai if available.
-      3) Try REST fallback (two common endpoint flavors) and return text.
-    Raises RuntimeError with a helpful message if all attempts fail.
+    Try modern google.genai then fallback to older google.generativeai.
+    Returns text or raises RuntimeError with brief message.
     """
     if not GEMINI_API_KEY:
-        raise RuntimeError("GEMINI_API_KEY not set in environment.")
+        raise RuntimeError("GEMINI_API_KEY not set.")
 
-    model_name = model_hint or "gemini-1.5-pro-002"
-    last_exc = None
+    model_name = model_hint or "gemini-2.0-flash"
 
-    # --- 1) modern SDK (google.genai) ---
+    # Try modern SDK
     try:
         try:
             from google import genai as genai_modern  # type: ignore
@@ -253,52 +162,47 @@ def call_gemini(prompt: str, max_tokens: int = 400, temperature: float = 0.2, mo
             genai_modern = None
 
         if genai_modern is not None:
+            client = genai_modern.Client(api_key=GEMINI_API_KEY)
+            # Try a commonly used call; some SDK versions differ.
             try:
-                client = genai_modern.Client(api_key=GEMINI_API_KEY)
-                # Different SDK versions use different signatures; try a couple.
-                try:
-                    resp = client.models.generate_content(
-                        model=model_name,
-                        contents=prompt,
-                        max_output_tokens=int(max_tokens),
-                        temperature=float(temperature),
-                    )
-                except TypeError:
-                    # fallback to other param names
-                    resp = client.models.generate_content(
-                        model=model_name,
-                        contents=prompt,
-                        temperature=float(temperature),
-                    )
-                # Normalize response
-                if hasattr(resp, "text") and resp.text:
-                    return resp.text
-                if hasattr(resp, "outputs") and resp.outputs:
-                    out0 = resp.outputs[0]
-                    if hasattr(out0, "content"):
-                        return out0.content
-                if hasattr(resp, "candidates") and resp.candidates:
-                    c = resp.candidates[0]
-                    if isinstance(c, dict):
-                        return c.get("content") or c.get("text") or str(c)
-                    return str(c)
-                return str(resp)
-            except Exception as e:
-                last_exc = e
+                resp = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    max_output_tokens=int(max_tokens),
+                    temperature=float(temperature),
+                )
+            except TypeError:
+                # fallback without max_output_tokens param
+                resp = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    temperature=float(temperature),
+                )
+            # Normalize response
+            if hasattr(resp, "text") and resp.text:
+                return resp.text
+            if hasattr(resp, "outputs") and resp.outputs:
+                out0 = resp.outputs[0]
+                if hasattr(out0, "content"):
+                    return out0.content
+            if hasattr(resp, "candidates") and resp.candidates:
+                first = resp.candidates[0]
+                if hasattr(first, "content"):
+                    return first.content
+                if isinstance(first, dict):
+                    return first.get("content") or first.get("text") or str(first)
+            return str(resp)
     except Exception:
         pass
 
-    # --- 2) legacy SDK (google.generativeai) ---
+    # Fallback: older google.generativeai
     try:
         if genai_legacy is not None:
             try:
-                # some versions require configure
                 try:
                     genai_legacy.configure(api_key=GEMINI_API_KEY)
                 except Exception:
                     pass
-
-                # try generate_text or GenerativeModel based APIs
                 if hasattr(genai_legacy, "generate_text"):
                     resp = genai_legacy.generate_text(model=model_name, prompt=prompt, max_output_tokens=int(max_tokens))
                     if isinstance(resp, dict):
@@ -306,10 +210,7 @@ def call_gemini(prompt: str, max_tokens: int = 400, temperature: float = 0.2, mo
                             if k in resp:
                                 v = resp[k]
                                 if isinstance(v, list) and v:
-                                    c = v[0]
-                                    if isinstance(c, dict):
-                                        return c.get("content") or c.get("text") or str(c)
-                                    return str(c)
+                                    return v[0].get("content") or v[0].get("text") or str(v[0])
                                 return str(v)
                     if hasattr(resp, "text") and resp.text:
                         return resp.text
@@ -330,145 +231,14 @@ def call_gemini(prompt: str, max_tokens: int = 400, temperature: float = 0.2, mo
                                     return str(c)
                                 return str(v)
                     return str(resp)
-            except Exception as e:
-                last_exc = e
+            except Exception:
+                pass
     except Exception:
         pass
 
-    # --- 3) REST fallback (try v1beta :generateContent and v1beta2 :generate) ---
-    import requests
-    headers = {"Content-Type": "application/json"}
-    # Some simple bodies used by different endpoints
-    body_v1beta = {
-        "contents": [
-            {"parts":[{"text": prompt}]}
-        ],
-        "temperature": float(temperature),
-        "maxOutputTokens": int(max_tokens)
-    }
-    body_v1beta2 = {
-        "prompt": {"text": prompt},
-        "temperature": float(temperature),
-        "max_output_tokens": int(max_tokens)
-    }
+    # If both fail, raise friendly error (caller will show fallback UI)
+    raise RuntimeError("Gemini SDK not available or call patterns failed. Ensure GEMINI_API_KEY and google-genai are installed/compatible.")
 
-    # Utility to attempt REST call and extract text robustly
-    def attempt_rest(url: str, json_body):
-        nonlocal last_exc
-        try:
-            resp = requests.post(url, json=json_body, headers=headers, timeout=20)
-            # Raise for HTTP errors so we can inspect status code
-            resp.raise_for_status()
-            j = resp.json()
-            # Try common fields in responses
-            # v1beta: outputs/candidates/response[0].content.parts[*].text
-            if isinstance(j, dict):
-                # many variants — check outputs -> content -> parts
-                if "outputs" in j and isinstance(j["outputs"], list) and j["outputs"]:
-                    out0 = j["outputs"][0]
-                    # try nested content -> parts -> text
-                    if isinstance(out0, dict):
-                        if "content" in out0:
-                            c = out0["content"]
-                            if isinstance(c, dict) and "parts" in c and isinstance(c["parts"], list):
-                                parts = c["parts"]
-                                if parts:
-                                    # join text parts if present
-                                    texts = []
-                                    for p in parts:
-                                        if isinstance(p, dict) and "text" in p:
-                                            texts.append(p["text"])
-                                        elif isinstance(p, str):
-                                            texts.append(p)
-                                    if texts:
-                                        return "\n".join(texts)
-                        # fallback: outputs[0].text
-                        if "text" in out0 and out0["text"]:
-                            return out0["text"]
-                # candidates
-                if "candidates" in j and isinstance(j["candidates"], list) and j["candidates"]:
-                    c0 = j["candidates"][0]
-                    if isinstance(c0, dict):
-                        return c0.get("content") or c0.get("text") or str(c0)
-                    return str(c0)
-                # v1beta2 style: candidate -> output -> content
-                if "output" in j and isinstance(j["output"], dict):
-                    # might contain "text" or "content"
-                    out = j["output"]
-                    if "text" in out:
-                        return out["text"]
-                    # some return "content" list
-                    if "content" in out:
-                        # try to flatten textual content
-                        cont = out["content"]
-                        if isinstance(cont, list):
-                            texts = []
-                            for item in cont:
-                                if isinstance(item, dict) and "text" in item:
-                                    texts.append(item["text"])
-                            if texts:
-                                return "\n".join(texts)
-                # very simple fallback: look for any string fields
-                for k, v in j.items():
-                    if isinstance(v, str) and len(v) > 10:
-                        return v
-            # if nothing matched, return raw JSON string
-            return json.dumps(j)  # fallback
-        except requests.HTTPError as he:
-            last_exc = he
-            # attach status to exception for caller to inspect
-            raise
-        except Exception as e:
-            last_exc = e
-            raise
-
-    # Build candidate URLs carefully (do not double-up path)
-    # Try v1beta :generateContent (older pattern)
-    endpoints = [
-        f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}",
-        f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generate?key={GEMINI_API_KEY}",
-        f"https://generativelanguage.googleapis.com/v1beta2/models/{model_name}:generate?key={GEMINI_API_KEY}",
-    ]
-
-    # Try endpoints in order; handle 404/401/403 specially
-    for idx, url in enumerate(endpoints):
-        try:
-            json_body = body_v1beta if "generateContent" in url else body_v1beta2
-            res_text = attempt_rest(url, json_body)
-            if res_text:
-                return res_text
-        except requests.HTTPError as he:
-            status = None
-            try:
-                status = he.response.status_code
-            except Exception:
-                pass
-            # If 404, try next endpoint; if 401/403 -> suggest invalid key
-            if status in (401, 403):
-                raise RuntimeError(f"Gemini REST auth error (status {status}). Check GEMINI_API_KEY permissions and that the key is valid. Last SDK error: {last_exc}")
-            if status == 404:
-                # try next candidate URL
-                continue
-            if status in (429, 503, 500):
-                # transient server error – raise but include helpful text
-                raise RuntimeError(f"Gemini REST server error (status {status}). Try again later. Last HTTP message: {he}")
-            # otherwise keep trying other endpoints
-            continue
-        except Exception as e:
-            # network / json parse etc -> try next endpoint
-            last_exc = e
-            continue
-
-    # All attempts exhausted
-    msg = "Gemini SDK not available and REST fallback failed. "
-    if last_exc:
-        msg += f"Last error: {last_exc}"
-    raise RuntimeError(msg)
-
-
-# ---------------------------
-# OpenAI chat wrapper (unchanged)
-# ---------------------------
 def call_openai_chat(prompt: str, model: str = "gpt-3.5-turbo", max_tokens: int = 400, temperature: float = 0.2) -> str:
     if openai is None:
         raise RuntimeError("OpenAI library not installed.")
@@ -1108,21 +878,21 @@ if "last_gemini_call_ts" not in st.session_state:
 
 render_header()
 
-# Authentication UI (unchanged logic but unique keys)
+# Authentication UI (unchanged)
 if not st.session_state.user:
     st.sidebar.title("Account")
-    auth_page = st.sidebar.radio("Sign Up / Login", ["Login", "Sign up", "Continue as guest", "Profile (view only)"], key="auth_radio_main")
+    auth_page = st.sidebar.radio("Sign Up / Login", ["Login", "Sign up", "Continue as guest", "Profile (view only)"], key="auth_radio")
 
     if auth_page in ("Login", "Sign up"):
         st.markdown('<div class="hero"><h1 style="margin:0">Care for your baby — simple, reliable, personalised</h1></div>', unsafe_allow_html=True)
 
     if auth_page == "Sign up":
         st.markdown('<div class="card"><h3>Create an account</h3>', unsafe_allow_html=True)
-        with st.form("signup_form", clear_on_submit=False):
-            su_name = st.text_input("Username", key="su_name_input")
-            su_pass = st.text_input("Password", type="password", key="su_pass_input")
-            su_confirm = st.text_input("Confirm Password", type="password", key="su_confirm_input")
-            s_sub = st.form_submit_button("Sign up", key="su_submit_btn")
+        with st.form("signup", clear_on_submit=False):
+            su_name = st.text_input("Username", key="su_name")
+            su_pass = st.text_input("Password", type="password", key="su_pass")
+            su_confirm = st.text_input("Confirm Password", type="password", key="su_confirm")
+            s_sub = st.form_submit_button("Sign up", key="su_submit")
             if s_sub:
                 if not su_name or not su_pass:
                     st.error("Enter username & password")
@@ -1139,10 +909,10 @@ if not st.session_state.user:
 
     elif auth_page == "Login":
         st.markdown('<div class="card"><h3>Login</h3>', unsafe_allow_html=True)
-        with st.form("login_form", clear_on_submit=False):
-            li_name = st.text_input("Username", key="li_name_input")
-            li_pass = st.text_input("Password", type="password", key="li_pass_input")
-            l_sub = st.form_submit_button("Log in", key="li_submit_btn")
+        with st.form("login", clear_on_submit=False):
+            li_name = st.text_input("Username", key="li_name")
+            li_pass = st.text_input("Password", type="password", key="li_pass")
+            l_sub = st.form_submit_button("Log in", key="li_submit")
             if l_sub:
                 ok, res = authenticate_user(li_name, li_pass)
                 if ok:
@@ -1436,8 +1206,7 @@ def page_assistant():
                     st.write("- If severe symptoms, seek immediate care.")
     card_end()
 
-# ... (keep the rest of your pages unchanged; they were included in your original file)
-# For brevity I include the rest verbatim exactly as from your source:
+# ... (other pages unchanged except Verified Data Assistant uses our OCR and VLM)
 def page_vaccine():
     card_start("💉 Vaccine Tracker", "Recommended vaccines & status for your child.")
     child = user_get_child()
@@ -1878,7 +1647,6 @@ def page_rag_assistant():
 
     st.markdown("---")
     st.subheader("Upload voice note (wav/mp3/m4a)")
-
     uploaded_audio = st.file_uploader("Upload voice note", type=["wav","mp3","m4a","ogg"], key="rag_voice")
     if uploaded_audio:
         fd, tmp_audio = tempfile.mkstemp(suffix=Path(uploaded_audio.name).suffix)
@@ -1982,12 +1750,9 @@ route_map.get(st.session_state.page, page_assistant)()
 # Footer
 st.markdown("---")
 st.markdown("<div class='muted'>🔒 <strong>All advice is for awareness only.</strong> For emergencies, consult a certified pediatrician or call local emergency services.</div>", unsafe_allow_html=True)
-<<<<<<< HEAD
 
 if __name__ == "__main__":
     question = "Write a bedtime story about stars and dreams."
     response = ask_gemini(question)
     print("\n🌙 Gemini says:\n")
     print(response)
-=======
->>>>>>> e8fd40ad544a19b0618c90ed35333f4dcad88c17
