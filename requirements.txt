@@ -1,32 +1,19 @@
-# Core app
 streamlit>=1.25.0
 fastapi
 uvicorn
 requests>=2.31.0
 python-dotenv>=1.0.0
-
-# AI APIs
 google-genai>=0.3.0
 openai>=1.0.0
-
-# OCR & Vision
 pillow>=9.5.0
 pytesseract
 easyocr
 numpy>=1.24.0
 opencv-python-headless>=4.8.0
-
-# Speech
 SpeechRecognition
 gTTS
-
-# Database
 pymongo
 dnspython
-
-# Data handling & viz
 pandas>=2.0.0
 altair>=5.0.0
-
-# Optional (vector DB if you use RAG)
 pinecone-client
